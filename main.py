@@ -258,10 +258,11 @@ for i_episode in itertools.count(1):
             state, _ = true_env.reset()
             episode_reward = 0
             done = False
+            truncated = False
             while not done and not truncated:
                 action = agent.select_action(state, evaluate=True)
 
-                next_state, reward, done, truncated, info = true_env.step(action, state)
+                next_state, reward, done, truncated, info = true_env.step(action)
                 episode_reward += reward
 
                 state = next_state

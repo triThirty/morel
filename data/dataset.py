@@ -57,8 +57,7 @@ class MORelDataset(Dataset):
             np.concatenate([self.source_observation[idx], self.source_action[idx]])
         )
         target = torch.FloatTensor(
-            # np.concatenate([self.target_delta[idx], self.target_reward[idx]])
-            np.append(self.source_observation[idx], self.target_reward[idx])
+            np.append(self.target_delta[idx], self.target_reward[idx])
         )
 
         return feed, target
