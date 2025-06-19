@@ -7,6 +7,12 @@ import torch
 from models.sac import SAC
 from torch.utils.tensorboard import SummaryWriter
 from models.replay_memory import ReplayMemory
+from env.dynamics_env import FakeEnv
+import minari
+
+from data.dataset import MORelDataset
+from models.Dynamics import DynamicsEnsemble
+from torch.utils.data import DataLoader
 
 parser = argparse.ArgumentParser(description="PyTorch Soft Actor-Critic Args")
 parser.add_argument(
@@ -116,9 +122,56 @@ parser.add_argument(
 parser.add_argument("--cuda", action="store_true", help="run on CUDA (default: False)")
 args = parser.parse_args()
 
+# Tesnorboard
+writer = SummaryWriter(
+    "runs/{}_SAC_{}_{}_{}".format(
+        datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
+        args.env_name,
+        args.policy,
+        "autotune" if args.automatic_entropy_tuning else "",
+    )
+)
+
+# TODO: Train a dynamics model by MOReL -> env: dynacmis_env
+dataset = minari.load_dataset("mujoco/reacher/expert-v0", download=True)
+dataset.set_seed(seed=args.seed)
+
+dynamics_model = DynamicsEnsemble(
+    input_dim=dataset.observation_space.shape[0] + dataset.action_space.shape[0],
+    output_dim=dataset.observation_space.shape[0] + 1,
+    n_models=4,
+    n_neurons=args.hidden_size,
+    threshold=1.5,
+    n_layers=2,
+    activation=torch.nn.ReLU,
+    cuda=args.cuda,
+)
+
+dataset = MORelDataset(dataset=dataset)
+
+dataloader = DataLoader(dataset, batch_size=128, shuffle=True)
+
+dynamics_model.train(dataloader=dataloader, epochs=1, summary_writer=writer)
+# writer.close
+
+env = FakeEnv(
+    dynamics_model,
+    dataset.observation_mean,
+    dataset.observation_std,
+    dataset.action_mean,
+    dataset.action_std,
+    dataset.delta_mean,
+    dataset.delta_std,
+    dataset.reward_mean,
+    dataset.reward_std,
+    timeout_steps=300,
+    uncertain_penalty=-100,
+    device="cpu",
+)
+
 # Environment
 # env = NormalizedActions(gym.make(args.env_name))
-env = gym.make(args.env_name)
+# env = gym.make(args.env_name)
 # env.seed(args.seed)
 env.action_space.seed(args.seed)
 
@@ -129,15 +182,6 @@ np.random.seed(args.seed)
 # Agent
 agent = SAC(env.observation_space.shape[0], env.action_space, args)
 
-# Tesnorboard
-writer = SummaryWriter(
-    "runs/{}_SAC_{}_{}_{}".format(
-        datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
-        args.env_name,
-        args.policy,
-        "autotune" if args.automatic_entropy_tuning else "",
-    )
-)
 
 # Memory
 memory = ReplayMemory(args.replay_size, args.seed)
@@ -155,9 +199,11 @@ for i_episode in itertools.count(1):
 
     while not done and not truncated:
         if args.start_steps > total_numsteps:
-            action = env.action_space.sample()  # Sample random action
+            action = torch.Tensor(env.action_space.sample())  # Sample random action
         else:
-            action = agent.select_action(state)  # Sample action from policy
+            action = torch.Tensor(
+                agent.select_action(state)
+            )  # Sample action from policy
 
         if len(memory) > args.batch_size:
             # Number of updates per step in environment
@@ -174,7 +220,7 @@ for i_episode in itertools.count(1):
                 writer.add_scalar("entropy_temprature/alpha", alpha, updates)
                 updates += 1
 
-        next_state, reward, done, truncated, info = env.step(action)  # Step
+        next_state, reward, done, truncated, info = env.step(action, state)  # Step
         episode_steps += 1
         total_numsteps += 1
         episode_reward += reward
@@ -209,7 +255,7 @@ for i_episode in itertools.count(1):
             while not done and not truncated:
                 action = agent.select_action(state, evaluate=True)
 
-                next_state, reward, done, truncated, info = env.step(action)
+                next_state, reward, done, truncated, info = env.step(action, state)
                 episode_reward += reward
 
                 state = next_state
