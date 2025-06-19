@@ -80,7 +80,7 @@ parser.add_argument(
 parser.add_argument(
     "--num_steps",
     type=int,
-    default=1000001,
+    default=1000000,
     metavar="N",
     help="maximum number of steps (default: 1000000)",
 )
@@ -132,7 +132,7 @@ writer = SummaryWriter(
     )
 )
 
-# TODO: Train a dynamics model by MOReL -> env: dynacmis_env
+# Train a dynamics model by MOReL -> env: fake_env
 dataset = minari.load_dataset("mujoco/reacher/expert-v0", download=True)
 dataset.set_seed(seed=args.seed)
 
@@ -151,10 +151,10 @@ dataset = MORelDataset(dataset=dataset)
 
 dataloader = DataLoader(dataset, batch_size=128, shuffle=True)
 
-dynamics_model.train(dataloader=dataloader, epochs=1, summary_writer=writer)
-# writer.close
+dynamics_model.train(dataloader=dataloader, epochs=5, summary_writer=writer)
 
-env = FakeEnv(
+# fake environment to augment the replay buffer
+fake_env = FakeEnv(
     dynamics_model,
     dataset.observation_mean,
     dataset.observation_std,
@@ -168,19 +168,18 @@ env = FakeEnv(
     uncertain_penalty=-100,
     device="cpu",
 )
+fake_env.action_space.seed(args.seed)
 
-# Environment
-# env = NormalizedActions(gym.make(args.env_name))
-# env = gym.make(args.env_name)
-# env.seed(args.seed)
-env.action_space.seed(args.seed)
+# true environment
+true_env = gym.make(args.env_name)
+true_env.action_space.seed(args.seed)
 
 torch.manual_seed(args.seed)
 np.random.seed(args.seed)
 
 
 # Agent
-agent = SAC(env.observation_space.shape[0], env.action_space, args)
+agent = SAC(true_env.observation_space.shape[0], true_env.action_space, args)
 
 
 # Memory
@@ -195,11 +194,13 @@ for i_episode in itertools.count(1):
     episode_steps = 0
     done = False
     truncated = False
-    state, _ = env.reset()
+    state, _ = fake_env.reset()
 
     while not done and not truncated:
         if args.start_steps > total_numsteps:
-            action = torch.Tensor(env.action_space.sample())  # Sample random action
+            action = torch.Tensor(
+                fake_env.action_space.sample()
+            )  # Sample random action
         else:
             action = torch.Tensor(
                 agent.select_action(state)
@@ -220,21 +221,25 @@ for i_episode in itertools.count(1):
                 writer.add_scalar("entropy_temprature/alpha", alpha, updates)
                 updates += 1
 
-        next_state, reward, done, truncated, info = env.step(action, state)  # Step
-        episode_steps += 1
-        total_numsteps += 1
-        episode_reward += reward
+        next_state, reward, done, truncated, info = fake_env.step(action, state)  # Step
+        if not info["HALT"]:
+            episode_steps += 1
+            total_numsteps += 1
+            episode_reward += reward
 
-        # Ignore the "done" signal if it comes from hitting the time horizon.
-        # (https://github.com/openai/spinningup/blob/master/spinup/algos/sac/sac.py)
-        mask = 1.0 if episode_steps == env._max_episode_steps else float(not done)
+            # Ignore the "done" signal if it comes from hitting the time horizon.
+            # (https://github.com/openai/spinningup/blob/master/spinup/algos/sac/sac.py)
+            mask = (
+                1.0 if episode_steps == fake_env._max_episode_steps else float(not done)
+            )
 
-        memory.push(
-            state, action, reward, next_state, mask
-        )  # Append transition to memory
+            memory.push(
+                state, action, reward, next_state, mask
+            )  # Append transition to memory
 
-        state = next_state
-
+            state = next_state
+        else:
+            continue
     if total_numsteps > args.num_steps:
         break
 
@@ -245,17 +250,18 @@ for i_episode in itertools.count(1):
         )
     )
 
+    # Evaluate
     if i_episode % 10 == 0 and args.eval is True:
         avg_reward = 0.0
         episodes = 10
         for _ in range(episodes):
-            state, _ = env.reset()
+            state, _ = true_env.reset()
             episode_reward = 0
             done = False
             while not done and not truncated:
                 action = agent.select_action(state, evaluate=True)
 
-                next_state, reward, done, truncated, info = env.step(action, state)
+                next_state, reward, done, truncated, info = true_env.step(action, state)
                 episode_reward += reward
 
                 state = next_state
@@ -270,4 +276,5 @@ for i_episode in itertools.count(1):
         )
         print("----------------------------------------")
 
-env.close()
+true_env.close()
+fake_env.close()
